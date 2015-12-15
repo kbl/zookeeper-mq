@@ -21,8 +21,6 @@ import threading
 import functools
 import time
 
-zookeeper.set_log_stream(sys.stdout)
-
 ZOO_OPEN_ACL_UNSAFE = {"perms":0x1f, "scheme":"world", "id" :"anyone"}
 
 def retry_on(*excepts):
@@ -44,8 +42,13 @@ def retry_on(*excepts):
 class ZooKeeper(object):
     """ Basic adapter; always retry on ConnectionLossException """
 
-    def __init__(self, quorum):
+    def __init__(self, quorum, timeout=10000):
+        """Connect to ZooKeeper quorum
+
+        timeout -- zookeeper session timeout in milliseconds
+        """
         self._quorum = quorum
+        self._timeout = timeout
 
         self._handle = None
         self._connected = False
@@ -65,9 +68,9 @@ class ZooKeeper(object):
 
         self._cv.acquire()
         try:
-            self._handle = zookeeper.init(self._quorum, watcher, 10000)
+            self._handle = zookeeper.init(self._quorum, watcher, self._timeout)
 
-            self._cv.wait(10.0)
+            self._cv.wait(self._timeout/1000)
             if not self._connected:
                 print >>sys.stderr, 'Unable to connecto the ZooKeeper cluster.'
                 sys.exit(-1)
@@ -152,14 +155,10 @@ class Consumer(object):
                 # create a temporary optimistic lock by forcing a version increase
                 self._zk.set(src, data, stat['version'])
                 self._zk.set(dest, data)
-
-                try:
-                    self._zk.delete(src, stat['version'] + 1)
-                except zookeeper.NoNodeException: pass # already removed
-
+                self._zk.delete(src, stat['version'] + 1)
                 return data
 
-            elif stat['ctime'] < (time.time() - 300): # 5 minutes
+            elif stat['ctime'] < 1000*(time.time() - 300): # 5 minutes. stat['ctime'] is in milliseconds since epoch.
                 # a producer failed to enqueue an element
                 # the consumer should just drop the empty item
                 try:
@@ -250,7 +249,7 @@ class GarbageCollector(object):
                     cpath = '/queue/consumers/' + child 
                     if not self._zk.exists(cpath + '/active'):
                         (data, stat) = self._zk.get(cpath, None)
-                        if stat['ctime'] < (time.time() - 300): # 5 minutes
+                        if stat['ctime'] < 1000*(time.time() - 300): # 5 minutes
                             (data, stat) = self._zk.get(cpath + '/item', None)
                             if data:
                                 self._zk.create_sequence('/queue/partial/item-', data)
